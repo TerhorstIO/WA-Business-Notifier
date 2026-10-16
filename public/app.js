@@ -28,6 +28,7 @@ const state = {
   chatsInfo: '',
   chatsError: '',
   tokenReveal: null,
+  publicUrl: '',
   error: '',
   notice: '',
   busy: false,
@@ -49,6 +50,11 @@ function formatTime(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return String(iso || '');
   return date.toLocaleString('de-DE');
+}
+
+function webhookUrl(webhookPath) {
+  const base = (state.publicUrl || location.origin).replace(/\/$/, '');
+  return `${base}${webhookPath}`;
 }
 
 function formatWid(wid) {
@@ -601,7 +607,7 @@ async function saveEndpoint() {
       body: JSON.stringify(endpointPayload(state.editing)),
     });
     if (data.token) {
-      state.tokenReveal = { webhookUrl: `${location.origin}${data.webhookPath}` };
+      state.tokenReveal = { webhookUrl: webhookUrl(data.webhookPath) };
       state.editing = null;
       state.view = 'endpoints';
       state.endpoints = (await api('/api/endpoints')).endpoints;
@@ -732,7 +738,7 @@ app.addEventListener('click', (event) => {
     captureForm();
     void api(`/api/endpoints/${state.editing.id}/token`, { method: 'POST', body: '{}' })
       .then((data) => {
-        state.tokenReveal = { webhookUrl: `${location.origin}${data.webhookPath}` };
+        state.tokenReveal = { webhookUrl: webhookUrl(data.webhookPath) };
         render();
       })
       .catch((err) => {
@@ -838,6 +844,7 @@ async function boot() {
     state.needsSetup = data.needsSetup;
     state.authenticated = data.authenticated;
     state.username = data.username || '';
+    state.publicUrl = data.publicUrl || '';
     if (data.authenticated) await enterApp();
     else render();
   } catch (err) {

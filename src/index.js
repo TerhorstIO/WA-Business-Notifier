@@ -114,6 +114,18 @@ function sameOrigin(req) {
   }
 }
 
+function publicUrl() {
+  const raw = typeof process.env.PUBLIC_URL === 'string' ? process.env.PUBLIC_URL.trim() : '';
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    return url.origin;
+  } catch {
+    return '';
+  }
+}
+
 function cookieOptions() {
   return {
     httpOnly: true,
@@ -214,6 +226,7 @@ function createApp() {
       needsSetup: !user,
       authenticated,
       username: authenticated ? user.username : null,
+      publicUrl: publicUrl(),
     });
   });
 
@@ -256,7 +269,13 @@ function createApp() {
   app.post('/api/logout', (req, res) => {
     const sid = readCookie(req, COOKIE);
     if (sid) db.deleteSession(sid);
-    res.clearCookie(COOKIE, { path: '/' });
+    const cookie = cookieOptions();
+    res.clearCookie(COOKIE, {
+      path: cookie.path,
+      httpOnly: cookie.httpOnly,
+      sameSite: cookie.sameSite,
+      secure: cookie.secure,
+    });
     res.json({ ok: true });
   });
 
