@@ -1,0 +1,15 @@
+# Webinterface: http://localhost:3000
+# Datenbank und WhatsApp-Session liegen in ./data
+# Image wird beim Push auf main gebaut und unter GitHub Releases veröffentlicht.
+services:
+  monitor:
+    image: ghcr.io/terhorstio/wa-business-notifier:latest
+    init: true
+    ports:
+      - "3000:3000"
+    environment:
+      TRUST_PROXY: "0"
+    volumes:
+      - ./data:/app/data
+    shm_size: "1gb"
+    restart: unless-stopped
