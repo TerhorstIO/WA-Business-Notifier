@@ -22,8 +22,10 @@ const state = {
   wa: null,
   meta: null,
   endpoints: [],
+  recipients: [],
   events: [],
   editing: null,
+  recipientEditing: null,
   chats: [],
   chatsInfo: '',
   chatsError: '',
@@ -196,7 +198,8 @@ function endpointsHtml() {
             <h2>${esc(endpoint.name)}</h2>
             <span class="badge ${endpoint.enabled ? 'on' : 'off'}">${endpoint.enabled ? 'Aktiv' : 'Inaktiv'}</span>
           </header>
-          <p class="muted">${esc(parserLabel(endpoint.parser))} · ${esc(endpoint.targetLabel || endpoint.targetChatId || 'Kein Zielchat')}</p>
+          <p class="muted">${esc(parserLabel(endpoint.parser))} · ${esc(recipientNames(endpoint.id) || 'Keine Empfänger')}</p>
+          ${endpointUrlBlock(endpoint)}
           <button type="button" class="secondary" data-action="edit-endpoint" data-id="${endpoint.id}">Bearbeiten</button>
         </article>
       `).join('')}</div>`
@@ -208,6 +211,25 @@ function endpointsHtml() {
     </div>
     ${bannerHtml()}
     ${cards}`;
+}
+
+function endpointUrlBlock(endpoint) {
+  if (!endpoint.webhookPath) {
+    return '<p class="muted">Diese URL wurde nicht gespeichert. „Token erneuern“ legt eine neue an, die danach hier stehen bleibt. Die bisherige Adresse in aaPanel oder Proxmox gilt dann nicht mehr.</p>';
+  }
+  const url = webhookUrl(endpoint.webhookPath);
+  return `
+    <div class="url-row">
+      <input class="url-input" readonly value="${esc(url)}" aria-label="Webhook-URL">
+      <button type="button" class="secondary" data-action="copy-url" data-url="${esc(url)}">Kopieren</button>
+    </div>`;
+}
+
+function recipientNames(endpointId) {
+  return state.recipients
+    .filter((recipient) => recipient.endpointIds.includes(endpointId))
+    .map((recipient) => recipient.name)
+    .join(', ');
 }
 
 function parserLabel(id) {
@@ -238,17 +260,17 @@ function endpointFormHtml() {
       <h2>Generisches JSON</h2>
       <p class="muted">${esc(parser?.hint || '')}</p>
     </section>`;
+  const urlField = editing.id ? `
+    <label>Webhook-URL
+      ${endpointUrlBlock(editing)}
+    </label>` : '';
   const extra = editing.id ? `
     <div class="actions">
       <button type="button" class="secondary" data-action="regen-token" ${dis}>Token erneuern</button>
       <button type="button" class="secondary" data-action="test-endpoint" ${dis}>Test senden</button>
       <button type="button" class="danger" data-action="delete-endpoint" ${dis}>Löschen</button>
-    </div>
-    <p class="muted">Der Token wird nur beim Anlegen oder Erneuern angezeigt. Danach gilt eine neue URL, die alte nicht mehr.</p>` : `
-    <p class="muted">Nach dem Anlegen wird die Webhook-URL einmal angezeigt. Sie muss von aaPanel oder Proxmox aus erreichbar sein.</p>`;
-  const chatOptions = state.chats.map((chat) => `
-    <option value="${esc(chat.id)}" data-name="${esc(chat.name)}">${esc(chat.isGroup ? 'Gruppe' : 'Chat')}: ${esc(chat.name)}</option>
-  `).join('');
+    </div>` : `
+    <p class="muted">Nach dem Speichern bleibt die Webhook-URL am Endpunkt sichtbar.</p>`;
   return `
     <div class="page-head">
       <h1>${editing.id ? 'Endpunkt bearbeiten' : 'Neuer Endpunkt'}</h1>
@@ -272,10 +294,72 @@ function endpointFormHtml() {
         </label>
         <p class="muted">Platzhalter: {{title}}, {{message}}, {{severity}}, {{type}}, {{source}}, {{timestamp}}, {{fields}}</p>
         ${generic}
-        <label>Nummer oder Chat-ID
-          <input name="targetChatId" value="${esc(editing.targetChatId)}" placeholder="491701234567" spellcheck="false" ${dis}>
+        <p class="muted">Empfänger legst du getrennt an und wählst dort, welche Endpunkte sie bekommen.</p>
+        ${urlField}
+        <button type="submit" ${dis}>Speichern</button>
+        ${extra}
+      </form>
+      ${snippet}
+    </div>`;
+}
+
+function recipientsHtml() {
+  const cards = state.recipients.length
+    ? `<div class="grid endpoints">${state.recipients.map((recipient) => `
+        <article class="card">
+          <header>
+            <h2>${esc(recipient.name)}</h2>
+            <span class="badge ${recipient.enabled ? 'on' : 'off'}">${recipient.enabled ? 'Aktiv' : 'Inaktiv'}</span>
+          </header>
+          <p class="muted">${esc(recipient.chatId)}</p>
+          <p class="muted">${esc(endpointNames(recipient.endpointIds) || 'Keinem Endpunkt zugeordnet')}</p>
+          <button type="button" class="secondary" data-action="edit-recipient" data-id="${recipient.id}">Bearbeiten</button>
+        </article>
+      `).join('')}</div>`
+    : '<p class="empty">Noch keine Empfänger. Lege eine Nummer oder Gruppe an und wähle die Endpunkte.</p>';
+  return `
+    <div class="page-head">
+      <h1>Empfänger</h1>
+      <button type="button" data-action="new-recipient">Neuer Empfänger</button>
+    </div>
+    ${bannerHtml()}
+    ${cards}`;
+}
+
+function endpointNames(ids) {
+  return state.endpoints
+    .filter((endpoint) => ids.includes(endpoint.id))
+    .map((endpoint) => endpoint.name)
+    .join(', ');
+}
+
+function recipientFormHtml() {
+  const editing = state.recipientEditing;
+  const dis = state.busy ? 'disabled' : '';
+  const checks = state.endpoints.map((endpoint) => `
+    <label class="check">
+      <input type="checkbox" name="endpointIds" value="${endpoint.id}" ${editing.endpointIds.includes(endpoint.id) ? 'checked' : ''} ${dis}>
+      <span>${esc(endpoint.name)}</span>
+    </label>`).join('');
+  const chatOptions = state.chats.map((chat) => `
+    <option value="${esc(chat.id)}">${esc(chat.isGroup ? 'Gruppe' : 'Chat')}: ${esc(chat.name)}</option>`).join('');
+  return `
+    <div class="page-head">
+      <h1>${editing.id ? 'Empfänger bearbeiten' : 'Neuer Empfänger'}</h1>
+      <button type="button" class="secondary" data-action="nav" data-view="recipients">Zurück</button>
+    </div>
+    ${bannerHtml()}
+    <form id="recipient-form" class="stack panel" data-action="save-recipient" autocomplete="off" style="max-width:640px">
+        <label>Name
+          <input name="name" required maxlength="80" value="${esc(editing.name)}" ${dis}>
         </label>
-        <input type="hidden" name="targetLabel" value="${esc(editing.targetLabel)}">
+        <label class="check">
+          <input type="checkbox" name="enabled" ${editing.enabled ? 'checked' : ''} ${dis}>
+          <span>Aktiv</span>
+        </label>
+        <label>Nummer oder Chat-ID
+          <input name="chatId" required value="${esc(editing.chatId)}" placeholder="491701234567" spellcheck="false" ${dis}>
+        </label>
         <div class="row">
           <button type="button" class="secondary" data-action="load-chats" ${dis}>Chats laden</button>
           <select id="chat-pick" ${dis}>
@@ -283,12 +367,14 @@ function endpointFormHtml() {
             ${chatOptions}
           </select>
         </div>
-        <p class="muted">${esc(state.chatsError || state.chatsInfo || 'WhatsApp muss verbunden sein, um Chats zu laden. Ohne Ziel werden Meldungen nicht gesendet.')}</p>
-        <button type="submit" ${dis}>Speichern</button>
-        ${extra}
-      </form>
-      ${snippet}
-    </div>`;
+        <p class="muted">${esc(state.chatsError || state.chatsInfo || 'WhatsApp muss verbunden sein, um Chats zu laden.')}</p>
+        <h2>Endpunkte</h2>
+        ${checks || '<p class="muted">Lege zuerst einen Endpunkt an.</p>'}
+        <div class="actions">
+          <button type="submit" ${dis}>Speichern</button>
+          ${editing.id ? `<button type="button" class="danger" data-action="delete-recipient" data-id="${editing.id}" ${dis}>Löschen</button>` : ''}
+        </div>
+    </form>`;
 }
 
 function eventsHtml() {
@@ -348,6 +434,8 @@ function viewHtml() {
   if (state.view === 'status') return `<section id="status-panel">${statusPanelInnerHtml()}</section>`;
   if (state.view === 'endpoints') return endpointsHtml();
   if (state.view === 'endpoint') return endpointFormHtml();
+  if (state.view === 'recipients') return recipientsHtml();
+  if (state.view === 'recipient') return recipientFormHtml();
   if (state.view === 'events') return eventsPageHtml();
   if (state.view === 'account') return accountHtml();
   return '';
@@ -359,7 +447,7 @@ function modalHtml() {
     <div class="modal-back" data-action="close-token">
       <div class="modal card" data-action="stop">
         <h2>Webhook-URL</h2>
-        <p class="muted">Diese URL wird nur jetzt im Klartext gezeigt. Kopiere sie in aaPanel oder Proxmox.</p>
+        <p class="muted">Kopiere die URL nach aaPanel oder Proxmox. Sie bleibt danach am Endpunkt stehen.</p>
         <input id="webhook-url" class="url-input" readonly value="${esc(state.tokenReveal.webhookUrl)}">
         <div class="actions">
           <button type="button" data-action="copy-url">Kopieren</button>
@@ -370,7 +458,7 @@ function modalHtml() {
 }
 
 function shellHtml() {
-  const current = state.view === 'endpoint' ? 'endpoints' : state.view;
+  const current = state.view === 'endpoint' ? 'endpoints' : state.view === 'recipient' ? 'recipients' : state.view;
   const tab = (id, label) => `
     <button type="button" data-action="nav" data-view="${id}" ${current === id ? 'aria-current="page"' : ''}>${label}</button>`;
   return `
@@ -383,6 +471,7 @@ function shellHtml() {
         <nav>
           ${tab('status', 'Status')}
           ${tab('endpoints', 'Endpunkte')}
+          ${tab('recipients', 'Empfänger')}
           ${tab('events', 'Protokoll')}
           ${tab('account', 'Konto')}
         </nav>
@@ -412,8 +501,7 @@ function editingFromEndpoint(endpoint) {
     enabled: endpoint.enabled,
     parser: endpoint.parser,
     template: endpoint.template,
-    targetChatId: endpoint.targetChatId,
-    targetLabel: endpoint.targetLabel,
+    webhookPath: endpoint.webhookPath || '',
     titlePath: endpoint.titlePath,
     messagePath: endpoint.messagePath,
   };
@@ -426,10 +514,25 @@ function blankEndpoint() {
     enabled: true,
     parser: 'generic',
     template: state.meta?.defaultTemplate || '*{{source}}* {{title}}\n\n{{message}}',
-    targetChatId: '',
-    targetLabel: '',
+    webhookPath: '',
     titlePath: 'title',
     messagePath: 'message',
+  };
+}
+
+function blankRecipient() {
+  return { id: null, name: '', enabled: true, chatId: '', endpointIds: [] };
+}
+
+function captureRecipientForm() {
+  const form = document.getElementById('recipient-form');
+  if (!form || !state.recipientEditing) return;
+  state.recipientEditing = {
+    ...state.recipientEditing,
+    name: form.name.value,
+    enabled: form.enabled.checked,
+    chatId: form.chatId.value,
+    endpointIds: [...form.querySelectorAll('input[name="endpointIds"]:checked')].map((input) => Number(input.value)),
   };
 }
 
@@ -442,8 +545,6 @@ function captureForm() {
     enabled: form.enabled.checked,
     parser: form.parser.value,
     template: form.template.value,
-    targetChatId: form.targetChatId.value,
-    targetLabel: form.targetLabel.value,
     titlePath: form.titlePath.value,
     messagePath: form.messagePath.value,
   };
@@ -455,8 +556,6 @@ function endpointPayload(editing) {
     enabled: editing.enabled,
     parser: editing.parser,
     template: editing.template,
-    targetChatId: editing.targetChatId,
-    targetLabel: editing.targetLabel,
     titlePath: editing.titlePath,
     messagePath: editing.messagePath,
   };
@@ -478,10 +577,16 @@ async function enterApp() {
 async function showView(view) {
   state.view = view;
   state.editing = null;
+  state.recipientEditing = null;
   state.error = '';
   state.notice = '';
-  if (view === 'endpoints') {
-    state.endpoints = (await api('/api/endpoints')).endpoints;
+  if (view === 'endpoints' || view === 'recipients') {
+    const [endpoints, recipients] = await Promise.all([
+      api('/api/endpoints'),
+      api('/api/recipients'),
+    ]);
+    state.endpoints = endpoints.endpoints;
+    state.recipients = recipients.recipients;
   }
   if (view === 'events') {
     state.events = (await api('/api/events')).events;
@@ -511,7 +616,7 @@ async function copyFrom(text, button) {
     await navigator.clipboard.writeText(text);
     button.textContent = 'Kopiert';
   } catch {
-    const input = document.getElementById('webhook-url');
+    const input = button.parentElement?.querySelector('.url-input') || document.getElementById('webhook-url');
     if (input) {
       input.focus();
       input.select();
@@ -610,7 +715,12 @@ async function saveEndpoint() {
       state.tokenReveal = { webhookUrl: webhookUrl(data.webhookPath) };
       state.editing = null;
       state.view = 'endpoints';
-      state.endpoints = (await api('/api/endpoints')).endpoints;
+      const [endpoints, recipients] = await Promise.all([
+        api('/api/endpoints'),
+        api('/api/recipients'),
+      ]);
+      state.endpoints = endpoints.endpoints;
+      state.recipients = recipients.recipients;
     } else {
       state.notice = 'Gespeichert';
       state.editing = editingFromEndpoint(data.endpoint);
@@ -618,6 +728,35 @@ async function saveEndpoint() {
   } catch (err) {
     state.error = err.message;
   } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function saveRecipient() {
+  captureRecipientForm();
+  state.busy = true;
+  state.error = '';
+  state.notice = '';
+  render();
+  try {
+    const editing = state.recipientEditing;
+    const creating = !editing.id;
+    await api(creating ? '/api/recipients' : `/api/recipients/${editing.id}`, {
+      method: creating ? 'POST' : 'PUT',
+      body: JSON.stringify({
+        name: editing.name,
+        enabled: editing.enabled,
+        chatId: editing.chatId,
+        endpointIds: editing.endpointIds,
+      }),
+    });
+    state.busy = false;
+    await showView('recipients');
+    state.notice = 'Gespeichert';
+    render();
+  } catch (err) {
+    state.error = err.message;
     state.busy = false;
     render();
   }
@@ -632,6 +771,7 @@ app.addEventListener('submit', (event) => {
   if (form.dataset.action === 'login') void submitLogin(form);
   if (form.dataset.action === 'password') void submitPassword(form);
   if (form.dataset.action === 'save-endpoint') void saveEndpoint();
+  if (form.dataset.action === 'save-recipient') void saveRecipient();
 });
 
 app.addEventListener('change', (event) => {
@@ -644,14 +784,10 @@ app.addEventListener('change', (event) => {
     render();
   }
   if (el.id === 'chat-pick' && el instanceof HTMLSelectElement) {
-    const form = document.getElementById('endpoint-form');
+    const form = document.getElementById('recipient-form');
     const option = el.selectedOptions[0];
     if (!form || !option || !option.value) return;
-    form.targetChatId.value = option.value;
-    form.targetLabel.value = option.dataset.name || '';
-  }
-  if (el instanceof HTMLInputElement && el.name === 'targetChatId' && el.form) {
-    el.form.targetLabel.value = '';
+    form.chatId.value = option.value;
   }
 });
 
@@ -704,8 +840,8 @@ app.addEventListener('click', (event) => {
     return;
   }
   if (action === 'copy-url') {
-    const input = document.getElementById('webhook-url');
-    if (input) void copyFrom(input.value, button);
+    const text = button.dataset.url || document.getElementById('webhook-url')?.value;
+    if (text) void copyFrom(text, button);
     return;
   }
   if (action === 'copy-snippet') {
@@ -713,8 +849,46 @@ app.addEventListener('click', (event) => {
     if (parser?.body) void copyFrom(parser.body, button);
     return;
   }
+  if (action === 'new-recipient') {
+    state.recipientEditing = blankRecipient();
+    state.view = 'recipient';
+    state.error = '';
+    state.notice = '';
+    state.chatsInfo = '';
+    state.chatsError = '';
+    render();
+    return;
+  }
+  if (action === 'edit-recipient') {
+    const recipient = state.recipients.find((item) => String(item.id) === button.dataset.id);
+    if (!recipient) return;
+    state.recipientEditing = {
+      id: recipient.id,
+      name: recipient.name,
+      enabled: recipient.enabled,
+      chatId: recipient.chatId,
+      endpointIds: [...recipient.endpointIds],
+    };
+    state.view = 'recipient';
+    state.error = '';
+    state.notice = '';
+    render();
+    return;
+  }
+  if (action === 'delete-recipient') {
+    const id = button.dataset.id || state.recipientEditing?.id;
+    if (!id || !window.confirm('Empfänger wirklich löschen?')) return;
+    void api(`/api/recipients/${id}`, { method: 'DELETE' })
+      .then(() => showView('recipients'))
+      .catch((err) => {
+        state.error = err.message;
+        render();
+      });
+    return;
+  }
   if (action === 'load-chats') {
-    captureForm();
+    if (state.view === 'recipient') captureRecipientForm();
+    else captureForm();
     state.busy = true;
     render();
     void api('/api/whatsapp/chats?refresh=1')
@@ -738,6 +912,9 @@ app.addEventListener('click', (event) => {
     captureForm();
     void api(`/api/endpoints/${state.editing.id}/token`, { method: 'POST', body: '{}' })
       .then((data) => {
+        state.editing = { ...state.editing, webhookPath: data.webhookPath };
+        const listed = state.endpoints.find((item) => item.id === state.editing.id);
+        if (listed) listed.webhookPath = data.webhookPath;
         state.tokenReveal = { webhookUrl: webhookUrl(data.webhookPath) };
         render();
       })
@@ -751,9 +928,14 @@ app.addEventListener('click', (event) => {
     if (!state.editing?.id) return;
     captureForm();
     void api(`/api/endpoints/${state.editing.id}/test`, { method: 'POST', body: '{}' })
-      .then(() => {
-        state.notice = 'Test wurde in die Warteschlange gelegt';
-        state.error = '';
+      .then((data) => {
+        if (data.queued) {
+          state.notice = 'Test wurde in die Warteschlange gelegt';
+          state.error = '';
+        } else {
+          state.notice = '';
+          state.error = 'Keine Empfänger zugeordnet';
+        }
         render();
       })
       .catch((err) => {

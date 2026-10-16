@@ -199,6 +199,8 @@ pre, .url-input {
 }
 
 .url-input { width: 100%; }
+.url-row { display: flex; gap: 8px; align-items: center; }
+.url-row .url-input { flex: 1; min-width: 0; }
 
 details {
   background: var(--panel);

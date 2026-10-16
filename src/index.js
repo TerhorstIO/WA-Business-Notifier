@@ -29,10 +29,9 @@ function mapEndpoint(row) {
     enabled: !!row.enabled,
     parser: row.parser,
     template: row.template,
-    targetChatId: row.target_chat_id,
-    targetLabel: row.target_label,
     titlePath: row.title_path,
     messagePath: row.message_path,
+    webhookPath: row.token ? `/hooks/${row.token}` : '',
     createdAt: row.created_at,
   };
 }
@@ -74,27 +73,47 @@ function parseEndpointInput(body) {
     throw httpError(400, 'Feldpfad ungültig');
   }
 
-  let targetChatId = '';
-  let targetLabel = typeof source.targetLabel === 'string' ? source.targetLabel.trim() : '';
-  const rawTarget = typeof source.targetChatId === 'string' ? source.targetChatId.trim() : '';
-  if (rawTarget) {
-    try {
-      targetChatId = normalizeChatId(rawTarget);
-    } catch (err) {
-      throw httpError(400, err.message);
-    }
-    if (!targetLabel) targetLabel = rawTarget;
-  }
-
   return {
     name,
     enabled: source.enabled !== false,
     parser: source.parser,
     template,
-    target_chat_id: targetChatId,
-    target_label: targetLabel.slice(0, 120),
     title_path: titlePath,
     message_path: messagePath,
+  };
+}
+
+function mapRecipient(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    chatId: row.chat_id,
+    enabled: !!row.enabled,
+    endpointIds: row.endpointIds || [],
+    createdAt: row.created_at,
+  };
+}
+
+function parseRecipientInput(body) {
+  const source = body && typeof body === 'object' ? body : {};
+  const name = typeof source.name === 'string' ? source.name.trim() : '';
+  if (name.length < 1 || name.length > 80) {
+    throw httpError(400, 'Name fehlt oder ist zu lang');
+  }
+  let chatId = '';
+  try {
+    chatId = normalizeChatId(source.chatId);
+  } catch (err) {
+    throw httpError(400, err.message);
+  }
+  const endpointIds = Array.isArray(source.endpointIds)
+    ? [...new Set(source.endpointIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))]
+    : [];
+  return {
+    name,
+    chat_id: chatId,
+    enabled: source.enabled !== false,
+    endpointIds,
   };
 }
 
@@ -327,7 +346,7 @@ function createApp() {
   app.post('/api/endpoints', asyncRoute(async (req, res) => {
     const fields = parseEndpointInput(req.body);
     const token = newToken();
-    const id = db.insertEndpoint({ ...fields, token_hash: hashToken(token) });
+    const id = db.insertEndpoint({ ...fields, token_hash: hashToken(token), token });
     res.status(201).json({
       endpoint: mapEndpoint(db.getEndpoint(id)),
       token,
@@ -360,7 +379,7 @@ function createApp() {
       return;
     }
     const token = newToken();
-    db.updateToken(id, hashToken(token));
+    db.updateToken(id, hashToken(token), token);
     res.json({
       endpoint: mapEndpoint(db.getEndpoint(id)),
       token,
@@ -377,6 +396,36 @@ function createApp() {
     }
     const result = dispatcher.sendTest(endpoint);
     res.status(result.httpStatus).json(result.body);
+  });
+
+  app.get('/api/recipients', (req, res) => {
+    res.json({ recipients: db.listRecipients().map(mapRecipient) });
+  });
+
+  app.post('/api/recipients', asyncRoute(async (req, res) => {
+    const fields = parseRecipientInput(req.body);
+    const id = db.insertRecipient(fields);
+    db.setRecipientEndpoints(id, fields.endpointIds);
+    res.status(201).json({ recipient: mapRecipient(db.getRecipient(id)) });
+  }));
+
+  app.put('/api/recipients/:id', asyncRoute(async (req, res) => {
+    const id = endpointId(req.params.id);
+    if (!id || !db.getRecipient(id)) throw httpError(404, 'Empfänger nicht gefunden');
+    const fields = parseRecipientInput(req.body);
+    db.updateRecipient(id, fields);
+    db.setRecipientEndpoints(id, fields.endpointIds);
+    res.json({ recipient: mapRecipient(db.getRecipient(id)) });
+  }));
+
+  app.delete('/api/recipients/:id', (req, res) => {
+    const id = endpointId(req.params.id);
+    if (!id || !db.getRecipient(id)) {
+      res.status(404).json({ error: 'Empfänger nicht gefunden' });
+      return;
+    }
+    db.deleteRecipient(id);
+    res.json({ ok: true });
   });
 
   app.get('/api/events', (req, res) => {

@@ -2,6 +2,37 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+function columnNames(database, table) {
+  return database.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name);
+}
+
+function migrateLegacyTargets(database) {
+  if (!columnNames(database, 'endpoints').includes('target_chat_id')) return;
+  const rows = database.prepare(`
+    SELECT id, name, target_chat_id, target_label
+    FROM endpoints
+    WHERE target_chat_id != ''
+  `).all();
+  const insertRecipient = database.prepare(`
+    INSERT INTO recipients (name, chat_id, enabled, created_at) VALUES (?, ?, 1, ?)
+  `);
+  const link = database.prepare(`
+    INSERT OR IGNORE INTO endpoint_recipients (endpoint_id, recipient_id) VALUES (?, ?)
+  `);
+  const now = new Date().toISOString();
+  for (const row of rows) {
+    const info = insertRecipient.run(row.target_label || row.name, row.target_chat_id, now);
+    link.run(row.id, Number(info.lastInsertRowid));
+  }
+  database.exec('ALTER TABLE endpoints DROP COLUMN target_chat_id');
+  database.exec('ALTER TABLE endpoints DROP COLUMN target_label');
+}
+
+function ensureTokenColumn(database) {
+  if (columnNames(database, 'endpoints').includes('token')) return;
+  database.exec(`ALTER TABLE endpoints ADD COLUMN token TEXT NOT NULL DEFAULT ''`);
+}
+
 function openDatabase(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const database = new DatabaseSync(path.join(dataDir, 'monitor.db'));
@@ -25,14 +56,27 @@ function openDatabase(dataDir) {
       id INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
       token_hash TEXT NOT NULL UNIQUE,
+      token TEXT NOT NULL DEFAULT '',
       enabled INTEGER NOT NULL DEFAULT 1,
       parser TEXT NOT NULL,
       template TEXT NOT NULL,
-      target_chat_id TEXT NOT NULL DEFAULT '',
-      target_label TEXT NOT NULL DEFAULT '',
       title_path TEXT NOT NULL DEFAULT 'title',
       message_path TEXT NOT NULL DEFAULT 'message',
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS recipients (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS endpoint_recipients (
+      endpoint_id INTEGER NOT NULL,
+      recipient_id INTEGER NOT NULL,
+      PRIMARY KEY (endpoint_id, recipient_id)
     );
 
     CREATE TABLE IF NOT EXISTS events (
@@ -58,6 +102,9 @@ function openDatabase(dataDir) {
     );
   `);
 
+  migrateLegacyTargets(database);
+  ensureTokenColumn(database);
+
   const stmts = {
     getUser: database.prepare('SELECT id, username, password_hash, password_salt, created_at FROM users WHERE id = 1'),
     insertUser: database.prepare(
@@ -75,16 +122,40 @@ function openDatabase(dataDir) {
     getEndpointByTokenHash: database.prepare('SELECT * FROM endpoints WHERE token_hash = ?'),
     insertEndpoint: database.prepare(`
       INSERT INTO endpoints (
-        name, token_hash, enabled, parser, template, target_chat_id, target_label, title_path, message_path, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        name, token_hash, token, enabled, parser, template, title_path, message_path, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     updateEndpoint: database.prepare(`
       UPDATE endpoints
-      SET name = ?, enabled = ?, parser = ?, template = ?, target_chat_id = ?, target_label = ?, title_path = ?, message_path = ?
+      SET name = ?, enabled = ?, parser = ?, template = ?, title_path = ?, message_path = ?
       WHERE id = ?
     `),
-    updateToken: database.prepare('UPDATE endpoints SET token_hash = ? WHERE id = ?'),
+    updateToken: database.prepare('UPDATE endpoints SET token_hash = ?, token = ? WHERE id = ?'),
     deleteEndpoint: database.prepare('DELETE FROM endpoints WHERE id = ?'),
+    deleteEndpointLinks: database.prepare('DELETE FROM endpoint_recipients WHERE endpoint_id = ?'),
+    listRecipients: database.prepare('SELECT * FROM recipients ORDER BY id ASC'),
+    getRecipient: database.prepare('SELECT * FROM recipients WHERE id = ?'),
+    insertRecipient: database.prepare(`
+      INSERT INTO recipients (name, chat_id, enabled, created_at) VALUES (?, ?, ?, ?)
+    `),
+    updateRecipient: database.prepare(`
+      UPDATE recipients SET name = ?, chat_id = ?, enabled = ? WHERE id = ?
+    `),
+    deleteRecipient: database.prepare('DELETE FROM recipients WHERE id = ?'),
+    deleteRecipientLinks: database.prepare('DELETE FROM endpoint_recipients WHERE recipient_id = ?'),
+    listRecipientEndpoints: database.prepare(`
+      SELECT endpoint_id FROM endpoint_recipients WHERE recipient_id = ? ORDER BY endpoint_id ASC
+    `),
+    insertLink: database.prepare(`
+      INSERT OR IGNORE INTO endpoint_recipients (endpoint_id, recipient_id) VALUES (?, ?)
+    `),
+    listRecipientsForEndpoint: database.prepare(`
+      SELECT recipients.*
+      FROM recipients
+      JOIN endpoint_recipients ON endpoint_recipients.recipient_id = recipients.id
+      WHERE endpoint_recipients.endpoint_id = ? AND recipients.enabled = 1
+      ORDER BY recipients.id ASC
+    `),
     insertEvent: database.prepare(`
       INSERT INTO events (
         created_at, endpoint_id, endpoint_name, status, summary, payload, message_text, error
@@ -182,11 +253,10 @@ function openDatabase(dataDir) {
     const info = stmts.insertEndpoint.run(
       fields.name,
       fields.token_hash,
+      fields.token,
       fields.enabled ? 1 : 0,
       fields.parser,
       fields.template,
-      fields.target_chat_id,
-      fields.target_label,
       fields.title_path,
       fields.message_path,
       new Date().toISOString(),
@@ -200,20 +270,65 @@ function openDatabase(dataDir) {
       fields.enabled ? 1 : 0,
       fields.parser,
       fields.template,
-      fields.target_chat_id,
-      fields.target_label,
       fields.title_path,
       fields.message_path,
       id,
     );
   }
 
-  function updateToken(id, tokenHash) {
-    stmts.updateToken.run(tokenHash, id);
+  function updateToken(id, tokenHash, token) {
+    stmts.updateToken.run(tokenHash, token, id);
   }
 
   function deleteEndpoint(id) {
+    stmts.deleteEndpointLinks.run(id);
     stmts.deleteEndpoint.run(id);
+  }
+
+  function listRecipients() {
+    return stmts.listRecipients.all().map((row) => ({
+      ...row,
+      endpointIds: stmts.listRecipientEndpoints.all(row.id).map((link) => link.endpoint_id),
+    }));
+  }
+
+  function getRecipient(id) {
+    const row = stmts.getRecipient.get(id);
+    if (!row) return undefined;
+    return {
+      ...row,
+      endpointIds: stmts.listRecipientEndpoints.all(id).map((link) => link.endpoint_id),
+    };
+  }
+
+  function insertRecipient(fields) {
+    const info = stmts.insertRecipient.run(
+      fields.name,
+      fields.chat_id,
+      fields.enabled ? 1 : 0,
+      new Date().toISOString(),
+    );
+    return rowId(info);
+  }
+
+  function updateRecipient(id, fields) {
+    stmts.updateRecipient.run(fields.name, fields.chat_id, fields.enabled ? 1 : 0, id);
+  }
+
+  function setRecipientEndpoints(recipientId, endpointIds) {
+    stmts.deleteRecipientLinks.run(recipientId);
+    for (const endpointId of endpointIds) {
+      if (stmts.getEndpoint.get(endpointId)) stmts.insertLink.run(endpointId, recipientId);
+    }
+  }
+
+  function deleteRecipient(id) {
+    stmts.deleteRecipientLinks.run(id);
+    stmts.deleteRecipient.run(id);
+  }
+
+  function listRecipientsForEndpoint(endpointId) {
+    return stmts.listRecipientsForEndpoint.all(endpointId);
   }
 
   function insertEvent(fields) {
@@ -298,6 +413,13 @@ function openDatabase(dataDir) {
     updateEndpoint,
     updateToken,
     deleteEndpoint,
+    listRecipients,
+    getRecipient,
+    insertRecipient,
+    updateRecipient,
+    setRecipientEndpoints,
+    deleteRecipient,
+    listRecipientsForEndpoint,
     insertEvent,
     updateEvent,
     listEvents,

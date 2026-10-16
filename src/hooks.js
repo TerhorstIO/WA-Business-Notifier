@@ -49,34 +49,56 @@ function createDispatcher({ db, whatsapp }) {
       return { httpStatus: 400, body: { error: err.message } };
     }
 
-    const summary = clip(test ? `Test: ${parsed.title}` : parsed.title, 200);
-    if (!endpoint.target_chat_id) {
-      recordEvent({
+    const title = clip(test ? `Test: ${parsed.title}` : parsed.title, 160);
+    const recipients = db.listRecipientsForEndpoint(endpoint.id).filter((recipient) => recipient.chat_id);
+    if (!recipients.length) {
+      const eventId = recordEvent({
         endpointId: endpoint.id,
         endpointName: endpoint.name,
         status: 'failed',
-        summary,
+        summary: title,
         payload: payloadText,
         messageText: message,
-        error: 'Kein Zielchat konfiguriert',
+        error: 'Keine Empfänger zugeordnet',
       });
-      return { httpStatus: 422, body: { error: 'Kein Zielchat konfiguriert' } };
+      return ack(eventId, false);
     }
 
-    const eventId = recordEvent({
-      endpointId: endpoint.id,
-      endpointName: endpoint.name,
-      status: 'queued',
-      summary,
-      payload: payloadText,
-      messageText: message,
-      error: null,
-    });
-    db.insertOutbound({ eventId, chatId: endpoint.target_chat_id, body: message });
+    let firstId = null;
+    for (const recipient of recipients) {
+      const eventId = recordEvent({
+        endpointId: endpoint.id,
+        endpointName: endpoint.name,
+        status: 'queued',
+        summary: clip(`${title} → ${recipient.name}`, 200),
+        payload: payloadText,
+        messageText: message,
+        error: null,
+      });
+      if (firstId == null) firstId = eventId;
+      db.insertOutbound({ eventId, chatId: recipient.chat_id, body: message });
+    }
     setImmediate(() => {
       flush().catch((err) => console.error('Versand', err));
     });
-    return { httpStatus: 202, body: { ok: true, id: eventId } };
+    return ack(firstId, true);
+  }
+
+  function ack(id, queued) {
+    return {
+      httpStatus: 200,
+      body: {
+        status: true,
+        code: 0,
+        msg: 'success',
+        StatusCode: 0,
+        StatusMessage: 'success',
+        data: {},
+        ok: true,
+        queued,
+        id,
+      },
+    };
   }
 
   function sendTest(endpoint) {
